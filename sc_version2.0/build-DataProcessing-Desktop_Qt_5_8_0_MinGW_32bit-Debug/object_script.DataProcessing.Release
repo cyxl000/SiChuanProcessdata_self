@@ -1,0 +1,12 @@
+INPUT(
+./release\main.o
+./release\mainwindow.o
+./release\readfilepath.o
+./release\readandwrite.o
+./release\cloudamountprocessing.o
+./release\radiationprocessing.o
+./release\sunshinerateprocessing.o
+./release\clarityprocessing.o
+./release\moc_mainwindow.o
+./release\moc_cloudamountprocessing.o
+);

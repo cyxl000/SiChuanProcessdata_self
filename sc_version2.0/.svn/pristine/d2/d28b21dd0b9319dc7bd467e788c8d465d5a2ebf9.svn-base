@@ -1,0 +1,34 @@
+#include "readfilepath.h"
+#include <QDebug>
+#include <QDir>
+#include <QFile>
+#include <QSettings>
+#include <QFileInfo>
+#include <QFileInfoList>
+#include <QTextCodec>
+ReadFilePath::ReadFilePath()
+{
+    QString currentPath = QCoreApplication::applicationDirPath();
+    qDebug()<<currentPath;
+    QDir mainDir(currentPath);
+    mainDir.cd("../");
+    QString configPath = mainDir.absolutePath() + "/config.ini";
+    if(!QFile(configPath).exists())
+        qDebug()<<"配置文件不存在";
+    QSettings configset(configPath,QSettings::IniFormat);
+    configset.setIniCodec(QTextCodec::codecForName("UTF8"));//解编码
+    consequencePath = configset.value("filePath/consequenceFilePath").toString();
+    baseCoordPath = configset.value("filePath/baseCoordPath").toString();
+    basicCloudPath = configset.value("filePath/basicCloudPath").toString();
+    kaiKuoDuPath = configset.value("filePath/kaiKuoDuPath").toString();
+    clarityFactorsPath = configset.value("filePath/clarityFactorsPath").toString();
+    sunRateFactorsPath = configset.value("filePath/sunRateFactorsPath").toString();
+    threadNum = configset.value("threadNumbers/threads").toInt();
+}
+QString ReadFilePath::consequencePath = "";
+QString ReadFilePath::baseCoordPath = "";
+QString ReadFilePath::basicCloudPath = "";
+QString ReadFilePath::clarityFactorsPath = "";
+QString ReadFilePath::kaiKuoDuPath = "";
+QString ReadFilePath::sunRateFactorsPath = "";
+int ReadFilePath::threadNum = 0;

@@ -1,0 +1,288 @@
+#include "cloudamountprocessing.h"
+#include "readfilepath.h"
+#include "readandwrite.h"
+#include "cloudamount.h"
+#include <QMessageBox>
+#include <QFile>
+#include <QDir>
+#include <QTextStream>
+#include <QtAlgorithms>
+#include <QDebug>
+cloudAmountProcessing::cloudAmountProcessing()
+{
+    minStandardX = 150;
+    maxStandardX = 0;
+    maxYBoundary = 0;
+    minYBoundary = 0;
+    minXBoundary = 0;
+    maxXBoundary = 0;
+}
+//一个线程处理一个月的数据
+void cloudAmountProcessing::process(const QString &monthPath)
+{
+    readAndWrite rwProcess;
+    //先取出标准经纬度的数据
+    QStringList baseCoordPathList = rwProcess.readFiles(ReadFilePath::baseCoordPath);
+    if(baseCoordPathList.length() != 1)
+    {
+        QMessageBox::information(NULL,"Errors!","标准经纬度文件夹中只能留一个文件！！");
+        return;
+    }
+    QVector<cloudAmount> basicCoord = readBasicCoord(baseCoordPathList.at(0));
+    maxYBoundary = basicCoord.at(0).YCoord + 1;
+    minYBoundary = basicCoord.at(basicCoord.size() - 1).YCoord - 1;
+    minXBoundary = minStandardX - 1;
+    maxXBoundary = maxStandardX + 1;
+    qDebug()<<maxXBoundary<<";"<<minXBoundary<<"\n"<<maxYBoundary<<";"<<minYBoundary;
+    /*
+     * 遍历目标文件路径中的所有文件夹，
+     * 读取每个月的值，
+     * 对每个月的值进行预处理,
+     * 再对每个月的值进行插值运算
+     * 最后对最终的结果basicCoord求平均值
+     * 然后写入.csv文件中
+     */
+    QStringList dayPathList = rwProcess.readFiles(monthPath);
+    foreach (QString dayPath, dayPathList)
+    {
+        QVector<dataStorage> singleFileData = readBasicData(dayPath);
+        preprocessing(singleFileData);
+        if(singleFileData.length() != 0)
+        {
+            //排序
+            qSort(singleFileData.begin(),singleFileData.end(),[](const dataStorage &infoA,
+                  const dataStorage &infoB){
+                return infoA.YCoord > infoB.YCoord;});
+            //插值
+            insertAmount(singleFileData,basicCoord);
+        }
+    }
+    //求平均,还是对basicCoord进行传引用操作
+    averageData(basicCoord);
+    //写入文件
+    QStringList nameList = monthPath.split("/");
+    QString fileName = nameList.at(nameList.size() - 2);
+    writeCLoud(basicCoord,fileName,"CloudAmount");
+}
+//求平均
+void cloudAmountProcessing::averageData(QVector<cloudAmount> &sumData)
+{
+    QVector<cloudAmount> cleanData;
+    for(int i = 0;i < sumData.length();i++)
+    {
+        int filesLength = sumData.at(i).Clouds.length();
+        double sumCloud = 0;
+        for(int j = 0;j < filesLength;j++)
+        {
+            sumCloud += sumData.at(i).Clouds.at(j);
+        }
+        double averCloud = 0;
+        if(filesLength == 0)
+            QMessageBox::information(NULL,"warning","有云量为空！！");
+        else
+            averCloud = sumCloud/filesLength;
+        cloudAmount tmp;
+        tmp.XCoord = sumData.at(i).XCoord;
+        tmp.YCoord = sumData.at(i).YCoord;
+        tmp.Clouds.append(averCloud);
+        tmp.Clouds.append(sumCloud);
+        tmp.Clouds.append(filesLength);
+        cleanData.append(tmp);
+    }
+    sumData = cleanData;
+}
+//插值
+void cloudAmountProcessing::insertAmount(const QVector<dataStorage> &rangeData, QVector<cloudAmount> &finishedData)
+{
+    double maxRangeY = rangeData.at(0).YCoord;
+    double minRangeY = rangeData.at(rangeData.size() - 1).YCoord;
+    for(int i = 0;i < finishedData.length();i++)
+    {
+        if(finishedData.at(i).YCoord <= maxRangeY && finishedData.at(i).YCoord >= minRangeY)
+        {
+            //取出来一定范围的点
+            QVector<dataStorage> dotArea;
+            for(int j = 0;j < rangeData.length();j++)
+            {
+                if((rangeData.at(j).XCoord < finishedData.at(i).XCoord + 1)
+                        && (rangeData.at(j).XCoord > finishedData.at(i).XCoord - 1)
+                        && (rangeData.at(j).YCoord < finishedData.at(i).YCoord + 1)
+                        && (rangeData.at(j).YCoord > finishedData.at(i).YCoord - 1))
+                {
+                    double len = sqrt((finishedData.at(i).XCoord - rangeData.at(j).XCoord)*(finishedData.at(i).XCoord - rangeData.at(j).XCoord) + (finishedData.at(i).YCoord - rangeData.at(j).YCoord)*(finishedData.at(i).YCoord - rangeData.at(j).YCoord));
+                    dataStorage tmp = rangeData.at(j);
+                    tmp.len = len;
+                    dotArea.append(tmp);
+                }
+            }
+            //找最近的四个点:由距离排序,然后取得最近的四个点
+            qSort(dotArea.begin(),dotArea.end(),[](const dataStorage &infoA,
+                  const dataStorage &infoB){
+                return infoA.len < infoB.len;});
+            qDebug()<<"begin.........";
+            if(!dotArea.empty())
+            {
+                if(dotArea.at(0).len <= 0.001)
+                {
+                    finishedData[i].Clouds.append(dotArea.at(0).myValue);
+                }
+                else
+                {
+                    int fnum = 0;
+                    double fractionC = 0;//小于0.05的分子和
+                    double numeratorC = 0;//小于0.05的分母和
+                    double sumF = 0;//都有点分子之和
+                    double sumN = 0;//所有点分母之和
+                    //判断数列个数是否小于4
+                    double cLen = 0;
+                    if(dotArea.length() < 4)
+                    {
+                        cLen = dotArea.length();
+                    }
+                    else
+                    {
+                        cLen = 4;
+                    }
+                    //求出应该插值的点的值
+                    for(int k = 0;k < cLen;k++)
+                    {
+                        double c = dotArea.at(cLen - 1 - k).myValue;
+                        double l = dotArea.at(k).len;
+                        double ck = c*l;
+                        sumF += ck;
+                        sumN += l;
+                        if(l < 0.05)
+                        {
+                            fractionC += ck;
+                            numeratorC += l;
+                            fnum++;
+                        }
+                    }
+                    //当离散点小于0.05的个数大于1个时就直接插值，如果是0或者1个，就判断0.05范围之外的点有没有4个，有，就插值；没有，就不管
+                    if(fnum > 1)
+                    {
+                        double myCloud = fractionC/numeratorC;
+                        finishedData[i].Clouds.append(myCloud);
+                    }
+                    else
+                    {
+                        if(cLen == 4)
+                        {
+                            double myCloud = sumF/sumN;
+                            finishedData[i].Clouds.append(myCloud);
+                        }
+                    }
+                    qDebug()<<"......................";
+                }
+            }qDebug()<<"end....";
+        }
+    }
+
+}
+//预处理(把在标准坐标之外的数据全部去除)
+void cloudAmountProcessing::preprocessing(QVector<dataStorage> &sourceData)
+{
+    QVector<dataStorage> rangeData;
+    for(int i = 0;i < sourceData.length();i++)
+    {
+        if(sourceData.at(i).YCoord < maxYBoundary && sourceData.at(i).YCoord > minYBoundary)
+        {
+            if(sourceData.at(i).XCoord < maxXBoundary && sourceData.at(i).XCoord >minXBoundary)
+            {
+                rangeData.append(sourceData.at(i));
+               // qDebug()<<"source:"<<sourceData.at(i).YCoord;
+            }
+        }
+    }
+    sourceData = rangeData;
+}
+//因为这个基础数据的x、y的放置顺序与标准文件的不同，所以就单独写一个出来
+QVector<dataStorage> cloudAmountProcessing::readBasicData(const QString &dayPath)
+{
+    QVector<dataStorage> myData;
+    QFile file(dayPath);
+    if(!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    QMessageBox::information(NULL,"error!","所读取路径错误，无法打开文件\n"+dayPath);
+    QTextStream myout(&file);
+    while(!myout.atEnd())
+    {
+        QString line = myout.readLine();
+        QStringList ele = line.split(",");
+        QString x = ele.at(1);
+        QString y = ele.at(0);
+        QString v = ele.at(2);
+        dataStorage myLine;
+        myLine.XCoord = x.toDouble();
+        myLine.YCoord = y.toDouble();
+        myLine.myValue = v.toDouble();
+        myData.append(myLine);
+    }
+    file.close();
+    return myData;
+}
+//用于读取标准坐标的数据
+QVector<cloudAmount> cloudAmountProcessing::readBasicCoord(const QString &path)
+{
+    QVector<cloudAmount> myCoord;
+    QFile file(path);
+    if(!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+        QMessageBox::information(NULL,"Errors!","标准经纬读文件打开失败！！");
+    }
+    QTextStream stream(&file);
+    QString tmp = stream.readLine();
+    qDebug()<<tmp;
+    while(!stream.atEnd())
+    {
+        QString myLine = stream.readLine();
+        QStringList myEle = myLine.split(",");
+        cloudAmount cloud;
+        double x = myEle.at(0).toDouble();
+        if(x > maxStandardX)
+            maxStandardX = x;
+        else if(x < minStandardX)
+            minStandardX = x;
+        cloud.XCoord = x;
+        cloud.YCoord = myEle.at(1).toDouble();
+        myCoord.append(cloud);
+    }
+    file.close();
+    return myCoord;
+}
+void cloudAmountProcessing::writeCLoud(const QVector<cloudAmount> &finalData,
+                                       const QString &fileName,
+                                       const QString &valueName)
+{
+    QDir dir(ReadFilePath::consequencePath);
+    QString file1 = "云量最终结果";
+    dir.mkdir(file1);
+    dir.cd(file1);
+    QString filePath = dir.absolutePath() + "/" + fileName;
+    QFile file(filePath);
+    file.open(QIODevice::WriteOnly | QIODevice::Text);
+    QTextStream in(&file);
+    in << "XCoord,YCoord," << valueName << endl;
+    for(int i = 0;i < finalData.length();i++)
+    {
+        in << finalData.at(i).XCoord << "," << finalData.at(i).YCoord <<
+              "," <<finalData.at(i).Clouds.at(0) <<endl;
+    }
+    file.close();
+    //写中间结果
+    QString file2 = "云量中间结果";
+    dir.cd("../");
+    dir.mkdir(file2);
+    QString middlePath = dir.absolutePath() + "/" + fileName;
+    QFile middleFile(middlePath);
+    middleFile.open(QIODevice::WriteOnly | QIODevice::Text);
+    QTextStream middleIn(&middleFile);
+    middleIn << "XCoord,YCoord,"<<valueName<<",总云量,天数"<<endl;
+    for(int i = 0;i < finalData.length();i++)
+    {
+        in << finalData.at(i).XCoord << "," << finalData.at(i).YCoord <<
+              "," <<finalData.at(i).Clouds.at(0) <<
+              "," <<finalData.at(i).Clouds.at(1)<<
+              "," <<finalData.at(i).Clouds.at(2)<<endl;
+    }
+    middleFile.close();
+}
